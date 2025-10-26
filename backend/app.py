@@ -1,328 +1,202 @@
 from flask import Flask, request, jsonify, send_from_directory
 from flask_jwt_extended import JWTManager, jwt_required, get_jwt_identity
-from models import db, User, Image, Like, Comment, Notification
-from auth import init_auth_routes
-from utils import save_image, send_notification_email
+from flask_sqlalchemy import SQLAlchemy
+from werkzeug.security import generate_password_hash, check_password_hash
+from datetime import datetime
 import os
-from config import Config
+import uuid
+from PIL import Image as PILImage
+import re
+import phonenumbers
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 app = Flask(__name__)
-app.config.from_object(Config)
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY') or 'kapcha-secret-key'
+app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL') or 'sqlite:///kapcha.db'
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+app.config['UPLOAD_FOLDER'] = 'uploads'
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
+app.config['JWT_SECRET_KEY'] = os.environ.get('JWT_SECRET_KEY') or 'jwt-secret-key'
 
-# Initialize extensions
-db.init_app(app)
+db = SQLAlchemy(app)
 jwt = JWTManager(app)
 
-# Create tables
-with app.app_context():
-    db.create_all()
+# Create uploads directory
+os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
-# Initialize auth routes
-init_auth_routes(app)
+# Models
+class User(db.Model):
+    id = db.Column(db.String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    username = db.Column(db.String(80), unique=True, nullable=False)
+    email = db.Column(db.String(120), unique=True, nullable=False)
+    phone = db.Column(db.String(20), unique=True, nullable=False)
+    password_hash = db.Column(db.String(128), nullable=False)
+    is_private = db.Column(db.Boolean, default=False)
+    role = db.Column(db.String(20), default='user')
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    
+    def set_password(self, password):
+        self.password_hash = generate_password_hash(password)
+    
+    def check_password(self, password):
+        return check_password_hash(self.password_hash, password)
 
-# Serve uploaded files
+class Image(db.Model):
+    id = db.Column(db.String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    filename = db.Column(db.String(255), nullable=False)
+    original_filename = db.Column(db.String(255), nullable=False)
+    caption = db.Column(db.Text)
+    user_id = db.Column(db.String(36), db.ForeignKey('user.id'), nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    
+    user = db.relationship('User', backref='images')
+
+class Like(db.Model):
+    id = db.Column(db.String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = db.Column(db.String(36), db.ForeignKey('user.id'), nullable=False)
+    image_id = db.Column(db.String(36), db.ForeignKey('image.id'), nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    
+    user = db.relationship('User', backref='likes')
+    image = db.relationship('Image', backref='likes')
+
+class Comment(db.Model):
+    id = db.Column(db.String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    content = db.Column(db.Text, nullable=False)
+    user_id = db.Column(db.String(36), db.ForeignKey('user.id'), nullable=False)
+    image_id = db.Column(db.String(36), db.ForeignKey('image.id'), nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    
+    user = db.relationship('User', backref='comments')
+    image = db.relationship('Image', backref='comments')
+
+# Helper functions
+def allowed_file(filename):
+    ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'webp'}
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+def save_image(file):
+    if not allowed_file(file.filename):
+        return None
+    
+    ext = file.filename.rsplit('.', 1)[1].lower()
+    filename = f"{uuid.uuid4()}.{ext}"
+    filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+    
+    try:
+        image = PILImage.open(file)
+        if image.mode in ('RGBA', 'P'):
+            image = image.convert('RGB')
+        
+        max_size = (2000, 2000)
+        image.thumbnail(max_size, PILImage.Resampling.LANCZOS)
+        image.save(filepath, 'JPEG', quality=85)
+        return filename
+    except Exception as e:
+        print(f"Error processing image: {e}")
+        return None
+
+def validate_email(email):
+    pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    return re.match(pattern, email) is not None
+
+def validate_phone(phone):
+    try:
+        parsed = phonenumbers.parse(phone, None)
+        return phonenumbers.is_valid_number(parsed)
+    except:
+        return False
+
+# Routes
+@app.route('/')
+def home():
+    return jsonify({
+        'message': 'Kapcha API is running!',
+        'endpoints': {
+            'register': 'POST /api/register',
+            'login': 'POST /api/login',
+            'images': 'GET /api/images',
+            'upload': 'POST /api/images'
+        },
+        'frontend': 'http://localhost:8000'
+    })
+
+@app.route('/api/register', methods=['POST'])
+def register():
+    try:
+        data = request.get_json()
+        
+        if not data or not all(k in data for k in ['username', 'email', 'phone', 'password']):
+            return jsonify({'error': 'Missing required fields'}), 400
+        
+        if not validate_email(data['email']):
+            return jsonify({'error': 'Invalid email format'}), 400
+        
+        if not validate_phone(data['phone']):
+            return jsonify({'error': 'Invalid phone number'}), 400
+        
+        if User.query.filter_by(username=data['username']).first():
+            return jsonify({'error': 'Username already exists'}), 400
+        
+        if User.query.filter_by(email=data['email']).first():
+            return jsonify({'error': 'Email already exists'}), 400
+        
+        if User.query.filter_by(phone=data['phone']).first():
+            return jsonify({'error': 'Phone number already exists'}), 400
+        
+        user = User(
+            username=data['username'],
+            email=data['email'],
+            phone=data['phone']
+        )
+        user.set_password(data['password'])
+        
+        db.session.add(user)
+        db.session.commit()
+        
+        return jsonify({'message': 'User created successfully'}), 201
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/login', methods=['POST'])
+def login():
+    try:
+        data = request.get_json()
+        
+        user = User.query.filter_by(username=data.get('username')).first()
+        
+        if not user or not user.check_password(data.get('password')):
+            return jsonify({'error': 'Invalid credentials'}), 401
+        
+        from flask_jwt_extended import create_access_token
+        access_token = create_access_token(identity=user.id)
+        
+        return jsonify({
+            'access_token': access_token,
+            'user': {
+                'id': user.id,
+                'username': user.username,
+                'email': user.email,
+                'role': user.role,
+                'is_private': user.is_private
+            }
+        }), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 @app.route('/uploads/<filename>')
 def uploaded_file(filename):
     return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
 
-# Image routes
-@app.route('/api/images', methods=['POST'])
-@jwt_required()
-def upload_image():
-    user_id = get_jwt_identity()
-    
-    if 'image' not in request.files:
-        return jsonify({'error': 'No image file'}), 400
-    
-    file = request.files['image']
-    if file.filename == '':
-        return jsonify({'error': 'No selected file'}), 400
-    
-    filename = save_image(file)
-    if not filename:
-        return jsonify({'error': 'Invalid file type'}), 400
-    
-    caption = request.form.get('caption', '')
-    
-    image = Image(
-        filename=filename,
-        original_filename=file.filename,
-        caption=caption,
-        user_id=user_id
-    )
-    
-    db.session.add(image)
-    db.session.commit()
-    
-    return jsonify({
-        'message': 'Image uploaded successfully',
-        'image': {
-            'id': image.id,
-            'filename': image.filename,
-            'caption': image.caption,
-            'created_at': image.created_at.isoformat()
-        }
-    }), 201
-
-@app.route('/api/images', methods=['GET'])
-@jwt_required()
-def get_images():
-    user_id = get_jwt_identity()
-    current_user = User.query.get(user_id)
-    
-    # Get page and limit from query parameters
-    page = request.args.get('page', 1, type=int)
-    limit = request.args.get('limit', 20, type=int)
-    user_filter = request.args.get('user_id')
-    
-    query = Image.query
-    
-    if user_filter:
-        target_user = User.query.get(user_filter)
-        if not target_user:
-            return jsonify({'error': 'User not found'}), 404
-        
-        # Check if account is private and user is not owner
-        if target_user.is_private and target_user.id != user_id and current_user.role != 'admin':
-            return jsonify({'error': 'This account is private'}), 403
-        
-        query = query.filter_by(user_id=user_filter)
-    
-    images = query.order_by(Image.created_at.desc()).paginate(
-        page=page, per_page=limit, error_out=False
-    )
-    
-    result = []
-    for image in images.items:
-        # Check if current user has liked this image
-        user_like = Like.query.filter_by(user_id=user_id, image_id=image.id).first()
-        
-        result.append({
-            'id': image.id,
-            'filename': image.filename,
-            'caption': image.caption,
-            'user': {
-                'id': image.user.id,
-                'username': image.user.username,
-                'is_private': image.user.is_private
-            },
-            'likes_count': len(image.likes),
-            'comments_count': len(image.comments),
-            'user_has_liked': user_like is not None,
-            'created_at': image.created_at.isoformat()
-        })
-    
-    return jsonify({
-        'images': result,
-        'total': images.total,
-        'pages': images.pages,
-        'current_page': page
-    })
-
-# Like routes
-@app.route('/api/images/<image_id>/like', methods=['POST'])
-@jwt_required()
-def like_image(image_id):
-    user_id = get_jwt_identity()
-    
-    image = Image.query.get(image_id)
-    if not image:
-        return jsonify({'error': 'Image not found'}), 404
-    
-    # Check if user can view this image (private account check)
-    if image.user.is_private and image.user.id != user_id:
-        current_user = User.query.get(user_id)
-        if current_user.role != 'admin':
-            return jsonify({'error': 'Cannot like image from private account'}), 403
-    
-    existing_like = Like.query.filter_by(user_id=user_id, image_id=image_id).first()
-    if existing_like:
-        return jsonify({'error': 'Already liked'}), 400
-    
-    like = Like(user_id=user_id, image_id=image_id)
-    db.session.add(like)
-    
-    # Create notification
-    if image.user_id != user_id:  # Don't notify for own likes
-        notification = Notification(
-            user_id=image.user_id,
-            type='like',
-            source_user_id=user_id,
-            image_id=image_id,
-            message=f"liked your image"
-        )
-        db.session.add(notification)
-        
-        # Send email notification
-        source_user = User.query.get(user_id)
-        image_owner = User.query.get(image.user_id)
-        send_notification_email(
-            image_owner.email,
-            'like',
-            source_user.username,
-            image_id
-        )
-    
-    db.session.commit()
-    
-    return jsonify({'message': 'Image liked'}), 201
-
-@app.route('/api/images/<image_id>/like', methods=['DELETE'])
-@jwt_required()
-def unlike_image(image_id):
-    user_id = get_jwt_identity()
-    
-    like = Like.query.filter_by(user_id=user_id, image_id=image_id).first()
-    if not like:
-        return jsonify({'error': 'Like not found'}), 404
-    
-    db.session.delete(like)
-    db.session.commit()
-    
-    return jsonify({'message': 'Like removed'}), 200
-
-# Comment routes
-@app.route('/api/images/<image_id>/comments', methods=['POST'])
-@jwt_required()
-def add_comment(image_id):
-    user_id = get_jwt_identity()
-    data = request.get_json()
-    
-    if not data or 'content' not in data:
-        return jsonify({'error': 'Comment content required'}), 400
-    
-    image = Image.query.get(image_id)
-    if not image:
-        return jsonify({'error': 'Image not found'}), 404
-    
-    # Check if user can view this image (private account check)
-    if image.user.is_private and image.user.id != user_id:
-        current_user = User.query.get(user_id)
-        if current_user.role != 'admin':
-            return jsonify({'error': 'Cannot comment on private account'}), 403
-    
-    comment = Comment(
-        content=data['content'],
-        user_id=user_id,
-        image_id=image_id
-    )
-    db.session.add(comment)
-    
-    # Create notification
-    if image.user_id != user_id:  # Don't notify for own comments
-        notification = Notification(
-            user_id=image.user_id,
-            type='comment',
-            source_user_id=user_id,
-            image_id=image_id,
-            message=f"commented on your image"
-        )
-        db.session.add(notification)
-        
-        # Send email notification
-        source_user = User.query.get(user_id)
-        image_owner = User.query.get(image.user_id)
-        send_notification_email(
-            image_owner.email,
-            'comment',
-            source_user.username,
-            image_id
-        )
-    
-    db.session.commit()
-    
-    return jsonify({
-        'message': 'Comment added',
-        'comment': {
-            'id': comment.id,
-            'content': comment.content,
-            'user': {
-                'id': comment.user.id,
-                'username': comment.user.username
-            },
-            'created_at': comment.created_at.isoformat()
-        }
-    }), 201
-
-@app.route('/api/images/<image_id>/comments', methods=['GET'])
-@jwt_required()
-def get_comments(image_id):
-    user_id = get_jwt_identity()
-    
-    image = Image.query.get(image_id)
-    if not image:
-        return jsonify({'error': 'Image not found'}), 404
-    
-    # Check if user can view this image (private account check)
-    if image.user.is_private and image.user.id != user_id:
-        current_user = User.query.get(user_id)
-        if current_user.role != 'admin':
-            return jsonify({'error': 'Cannot view comments on private account'}), 403
-    
-    comments = Comment.query.filter_by(image_id=image_id).order_by(Comment.created_at.asc()).all()
-    
-    result = []
-    for comment in comments:
-        result.append({
-            'id': comment.id,
-            'content': comment.content,
-            'user': {
-                'id': comment.user.id,
-                'username': comment.user.username
-            },
-            'created_at': comment.created_at.isoformat()
-        })
-    
-    return jsonify({'comments': result})
-
-# Profile routes
-@app.route('/api/profile', methods=['PUT'])
-@jwt_required()
-def update_profile():
-    user_id = get_jwt_identity()
-    user = User.query.get(user_id)
-    data = request.get_json()
-    
-    if 'is_private' in data:
-        user.is_private = data['is_private']
-    
-    db.session.commit()
-    
-    return jsonify({
-        'message': 'Profile updated',
-        'user': {
-            'id': user.id,
-            'username': user.username,
-            'email': user.email,
-            'is_private': user.is_private,
-            'role': user.role
-        }
-    })
-
-# Admin routes
-@app.route('/api/admin/images/<image_id>', methods=['DELETE'])
-@jwt_required()
-def admin_delete_image(image_id):
-    user_id = get_jwt_identity()
-    user = User.query.get(user_id)
-    
-    if user.role != 'admin':
-        return jsonify({'error': 'Admin access required'}), 403
-    
-    image = Image.query.get(image_id)
-    if not image:
-        return jsonify({'error': 'Image not found'}), 404
-    
-    # Delete image file
-    try:
-        os.remove(os.path.join(app.config['UPLOAD_FOLDER'], image.filename))
-    except OSError:
-        pass  # File might not exist
-    
-    db.session.delete(image)
-    db.session.commit()
-    
-    return jsonify({'message': 'Image deleted'}), 200
+# Initialize database
+@app.before_first_request
+def create_tables():
+    db.create_all()
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    with app.app_context():
+        db.create_all()
+    app.run(debug=True, host='0.0.0.0', port=5000)
