@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Profile - Kapcha</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+    <nav class="navbar">
+        <div class="navbar-content">
+            <a href="index.html" class="logo">K</a>
+            <div class="nav-links">
+                <div id="authLinks">
+                    <a href="login.html">Login</a>
+                    <a href="register.html">Register</a>
+                </div>
+                <div id="userLinks" class="hidden">
+                    <a href="gallery.html">Gallery</a>
+                    <a href="upload.html">Upload</a>
+                    <a href="profile.html">Profile</a>
+                    <span>Welcome, <span id="username"></span></span>
+                    <a href="#" id="logoutBtn">Logout</a>
+                </div>
+            </div>
+        </div>
+    </nav>
+
+    <div class="main-content">
+        <div class="profile-header">
+            <h1>Profile</h1>
+            <div class="profile-stats">
+                <span>Welcome, <strong id="profileUsername"></strong></span>
+            </div>
+        </div>
+
+        <div class="profile-settings">
+            <h2>Privacy Settings</h2>
+            <div class="form-group">
+                <label>
+                    Private Account
+                    <label class="switch">
+                        <input type="checkbox" id="privateToggle">
+                        <span class="slider round"></span>
+                    </label>
+                </label>
+                <small>When enabled, only you can see your images and receive messages</small>
+            </div>
+        </div>
+
+        <div class="mt-2">
+            <h2>Your Images</h2>
+            <
