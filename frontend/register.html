@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Register - Kapcha</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+    <nav class="navbar">
+        <div class="navbar-content">
+            <a href="index.html" class="logo">K</a>
+            <div class="nav-links">
+                <a href="index.html">Home</a>
+                <a href="login.html">Login</a>
+            </div>
+        </div>
+    </nav>
+
+    <div class="main-content">
+        <div class="form-container">
+            <h2 class="text-center">Register</h2>
+            <form id="registerForm">
+                <div class="form-group">
+                    <label for="username">Username</label>
+                    <input type="text" id="username" name="username" required>
+                </div>
+                <div class="form-group">
+                    <label for="email">Email</label>
+                    <input type="email" id="email" name="email" required>
+                </div>
+                <div class="form-group">
+                    <label for="phone">Phone Number</label>
+                    <input type="tel" id="phone" name="phone" required>
+                </div>
+                <div class="form-group">
+                    <label for="password">Password</label>
+                    <input type="password" id="password" name="password" required>
+                </div>
+                <button type="submit" class="btn">Register</button>
+                <div id="registerError" class="mt-2"></div>
+            </form>
+            <p class="text-center mt-2">
+                Already have an account? <a href="login.html">Login here</a>
+            </p>
+        </div>
+    </div>
+
+    <script src="js/auth.js"></script>
+</body>
+</html>
